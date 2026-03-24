@@ -1,0 +1,21 @@
+{
+  "name": "second-brain-ai",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend/*",
+    "frontend/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:gateway": "cmd /c npm --workspace backend/api-gateway run dev",
+    "dev:content": "cmd /c npm --workspace backend/content-service run dev",
+    "dev:ai": "cmd /c npm --workspace backend/ai-service run dev",
+    "dev:search": "cmd /c npm --workspace backend/search-service run dev",
+    "dev:graph": "cmd /c npm --workspace backend/graph-service run dev",
+    "dev:worker": "cmd /c npm --workspace backend/worker-service run dev",
+    "dev:web": "cmd /c npm --workspace frontend/web-app run dev",
+    "build": "cmd /c npm run build --workspaces --if-present",
+    "lint": "cmd /c npm run lint --workspaces --if-present"
+  }
+}

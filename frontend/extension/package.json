@@ -1,0 +1,6 @@
+{
+  "name": "second-brain-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension for one-click Second Brain saves"
+}

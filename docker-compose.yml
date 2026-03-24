@@ -1,0 +1,165 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: second_brain
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api-gateway
+      - web-app
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/api-gateway/Dockerfile
+    environment:
+      NODE_ENV: production
+      JWT_SECRET: change-me
+      POSTGRES_URL: postgres://postgres:postgres@postgres:5432/second_brain
+      REDIS_URL: redis://redis:6379
+      QDRANT_URL: http://qdrant:6333
+      API_GATEWAY_PORT: 4000
+      CONTENT_SERVICE_PORT: 4101
+      AI_SERVICE_PORT: 4102
+      SEARCH_SERVICE_PORT: 4103
+      GRAPH_SERVICE_PORT: 4104
+      WORKER_SERVICE_PORT: 4105
+      CONTENT_SERVICE_URL: http://content-service:4101
+      AI_SERVICE_URL: http://ai-service:4102
+      SEARCH_SERVICE_URL: http://search-service:4103
+      GRAPH_SERVICE_URL: http://graph-service:4104
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      - content-service
+      - ai-service
+      - search-service
+      - graph-service
+
+  content-service:
+    build:
+      context: .
+      dockerfile: backend/content-service/Dockerfile
+    environment:
+      NODE_ENV: production
+      JWT_SECRET: change-me
+      POSTGRES_URL: postgres://postgres:postgres@postgres:5432/second_brain
+      REDIS_URL: redis://redis:6379
+      CONTENT_SERVICE_PORT: 4101
+    ports:
+      - "4101:4101"
+    depends_on:
+      - postgres
+      - redis
+
+  ai-service:
+    build:
+      context: .
+      dockerfile: backend/ai-service/Dockerfile
+    environment:
+      NODE_ENV: production
+      AI_SERVICE_PORT: 4102
+      OPENAI_API_KEY: ""
+      OPENAI_MODEL: gpt-4.1-mini
+      EMBEDDING_MODEL: text-embedding-3-small
+    ports:
+      - "4102:4102"
+
+  search-service:
+    build:
+      context: .
+      dockerfile: backend/search-service/Dockerfile
+    environment:
+      NODE_ENV: production
+      POSTGRES_URL: postgres://postgres:postgres@postgres:5432/second_brain
+      QDRANT_URL: http://qdrant:6333
+      AI_SERVICE_URL: http://ai-service:4102
+      AI_SERVICE_PORT: 4102
+      SEARCH_SERVICE_PORT: 4103
+    ports:
+      - "4103:4103"
+    depends_on:
+      - postgres
+      - qdrant
+      - ai-service
+
+  graph-service:
+    build:
+      context: .
+      dockerfile: backend/graph-service/Dockerfile
+    environment:
+      NODE_ENV: production
+      POSTGRES_URL: postgres://postgres:postgres@postgres:5432/second_brain
+      GRAPH_SERVICE_PORT: 4104
+    ports:
+      - "4104:4104"
+    depends_on:
+      - postgres
+
+  worker-service:
+    build:
+      context: .
+      dockerfile: backend/worker-service/Dockerfile
+    environment:
+      NODE_ENV: production
+      POSTGRES_URL: postgres://postgres:postgres@postgres:5432/second_brain
+      REDIS_URL: redis://redis:6379
+      CONTENT_SERVICE_URL: http://content-service:4101
+      AI_SERVICE_URL: http://ai-service:4102
+      SEARCH_SERVICE_URL: http://search-service:4103
+      GRAPH_SERVICE_URL: http://graph-service:4104
+      CONTENT_SERVICE_PORT: 4101
+      AI_SERVICE_PORT: 4102
+      SEARCH_SERVICE_PORT: 4103
+      GRAPH_SERVICE_PORT: 4104
+      WORKER_SERVICE_PORT: 4105
+    ports:
+      - "4105:4105"
+    depends_on:
+      - redis
+      - postgres
+      - content-service
+      - ai-service
+      - search-service
+      - graph-service
+
+  web-app:
+    build:
+      context: .
+      dockerfile: frontend/web-app/Dockerfile
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+
+volumes:
+  postgres_data:

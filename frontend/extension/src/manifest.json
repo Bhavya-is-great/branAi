@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Second Brain AI",
+  "version": "1.0.0",
+  "description": "Save the current tab into Second Brain AI",
+  "permissions": ["storage", "tabs", "activeTab"],
+  "host_permissions": ["http://localhost:4000/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
