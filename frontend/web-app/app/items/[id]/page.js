@@ -5,7 +5,51 @@ import { useParams } from "next/navigation";
 import { deleteItem, getCollections, getDemoToken, getGraph, getItem, getRelated, reprocessItem, saveHighlight, updateItem } from "../../../lib/api";
 
 const textLooksBinary = (value = "") => /\uFFFD|\u0000|ICC_PROFILE|JFIF|Exif|PNG|IHDR/.test(value) || value.length > 5000;
-const isYoutubeUrl = (value = "") => /(?:youtube\.com|youtu\.be|m\.youtube\.com|youtube-nocookie\.com)/i.test(String(value));
+const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
+
+const parseUrl = (value = "") => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw);
+  } catch {
+    if (/^[a-z][a-z\d+\-.]*:/i.test(raw)) return null;
+    try {
+      return new URL(`https://${raw}`);
+    } catch {
+      return null;
+    }
+  }
+};
+
+const extractYoutubeId = (value = "") => {
+  const raw = String(value || "").trim();
+  if (YOUTUBE_VIDEO_ID_PATTERN.test(raw)) return raw;
+
+  const parsed = parseUrl(raw);
+  if (!parsed) return null;
+
+  const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+  const segments = parsed.pathname.split("/").filter(Boolean);
+
+  if (host === "youtu.be") {
+    const candidate = segments[0] || "";
+    return YOUTUBE_VIDEO_ID_PATTERN.test(candidate) ? candidate : null;
+  }
+
+  if (!host.endsWith("youtube.com") && !host.endsWith("youtube-nocookie.com")) return null;
+
+  if (parsed.pathname === "/watch") {
+    const candidate = parsed.searchParams.get("v") || "";
+    return YOUTUBE_VIDEO_ID_PATTERN.test(candidate) ? candidate : null;
+  }
+
+  const marker = segments[0] || "";
+  const candidate = (["embed", "shorts", "live", "v"].includes(marker) ? segments[1] : "") || "";
+  return YOUTUBE_VIDEO_ID_PATTERN.test(candidate) ? candidate : null;
+};
+
+const isYoutubeUrl = (value = "") => Boolean(extractYoutubeId(value));
 
 export default function ItemDetailPage() {
   const params = useParams();
@@ -194,4 +238,5 @@ export default function ItemDetailPage() {
     </main>
   );
 }
+
 

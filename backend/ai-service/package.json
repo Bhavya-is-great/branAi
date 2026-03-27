@@ -8,8 +8,10 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
+    "@langchain/core": "^1.1.35",
+    "@langchain/ollama": "^1.2.6",
+    "@second-brain/shared": "1.0.0",
     "dotenv": "^16.4.7",
-    "fastify": "^5.2.1",
-    "@second-brain/shared": "1.0.0"
+    "fastify": "^5.2.1"
   }
 }

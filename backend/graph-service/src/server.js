@@ -29,6 +29,8 @@ const normalizeEmbedding = (value) => {
   }
 };
 
+const effectiveType = (item) => item.metadata?.detectedSourceType || item.source_type;
+
 const rebuildUserGraph = async (userId) => {
   const itemsResult = await pool.query("SELECT * FROM items WHERE user_id = $1 AND status = 'processed'", [userId]);
   const items = itemsResult.rows.map((item) => ({ ...item, embedding: normalizeEmbedding(item.embedding) }));
@@ -38,17 +40,29 @@ const rebuildUserGraph = async (userId) => {
     for (let j = i + 1; j < items.length; j += 1) {
       const left = items[i];
       const right = items[j];
+      const leftType = effectiveType(left);
+      const rightType = effectiveType(right);
+      const sameType = leftType === rightType;
       const tagOverlap = (left.ai_tags || []).filter((tag) => (right.ai_tags || []).includes(tag)).length;
       const vectorSimilarity = cosineSimilarity(left.embedding, right.embedding);
       const temporalDistance = Math.abs(new Date(left.created_at).getTime() - new Date(right.created_at).getTime()) / 86400000;
-      const temporalWeight = temporalDistance < 14 ? 0.2 : 0;
-      const weight = Number((vectorSimilarity * 0.65 + tagOverlap * 0.1 + temporalWeight).toFixed(4));
-      if (weight < 0.25) continue;
-      const relationType = vectorSimilarity > 0.72 ? "semantic_similarity" : tagOverlap ? "shared_tags" : "temporal_relation";
+      const temporalWeight = sameType && temporalDistance < 10 ? 0.08 : 0;
+
+      if (!sameType && (leftType === "image" || rightType === "image") && tagOverlap === 0 && vectorSimilarity < 0.92) {
+        continue;
+      }
+      if (!sameType && (leftType === "youtube" || rightType === "youtube") && tagOverlap === 0 && vectorSimilarity < 0.88) {
+        continue;
+      }
+
+      const sourcePenalty = sameType ? 1 : 0.58;
+      const weight = Number(((vectorSimilarity * 0.72 + tagOverlap * 0.12 + temporalWeight) * sourcePenalty).toFixed(4));
+      if (weight < 0.36) continue;
+      const relationType = vectorSimilarity > 0.82 ? "semantic_similarity" : tagOverlap ? "shared_tags" : "temporal_relation";
       await pool.query(
         `INSERT INTO relations (user_id, from_item_id, to_item_id, relation_type, weight, metadata)
          VALUES ($1, $2, $3, $4, $5, $6), ($1, $3, $2, $4, $5, $6)`,
-        [userId, left.id, right.id, relationType, weight, JSON.stringify({ tagOverlap, temporalDistance })]
+        [userId, left.id, right.id, relationType, weight, JSON.stringify({ tagOverlap, temporalDistance, leftType, rightType, vectorSimilarity })]
       );
     }
   }

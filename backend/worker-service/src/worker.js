@@ -19,6 +19,7 @@ app.listen({ port, host: "0.0.0.0" });
 
 const isYoutubeUrl = (value = "") => /(?:youtube\.com|youtu\.be|m\.youtube\.com|youtube-nocookie\.com)/i.test(String(value));
 const isTweetUrl = (value = "") => /(?:twitter\.com|x\.com)/i.test(String(value));
+const isLikelyImageUrl = (value = "") => /(?:\.(png|jpe?g|gif|webp|svg)(\?|$)|gstatic\.com\/images|googleusercontent\.com|imgur\.com|unsplash\.com|images\.pexels\.com)/i.test(String(value));
 
 const extractYoutubeTranscript = async (url) => {
   const { YoutubeTranscript } = await import("youtube-transcript");
@@ -63,6 +64,48 @@ const filenameFromUrl = (url = "") => {
 const titleFromFilename = (url = "") => {
   const file = filenameFromUrl(url).replace(/\.[a-z0-9]+$/i, "");
   return file.replace(/[-_]+/g, " ").trim() || "Saved image";
+};
+
+const imageKeywordsFromUrl = (url = "") =>
+  titleFromFilename(url)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+    .slice(0, 10);
+
+const fetchBinaryPreview = async (url) => {
+  if (!url) return null;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      }
+    });
+    if (!response.ok) return null;
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+    if (!contentType.includes("image/")) return null;
+    const imageBase64 = Buffer.from(await response.arrayBuffer()).toString("base64");
+    return { imageBase64, imageContentType: contentType };
+  } catch {
+    return null;
+  }
+};
+
+const imageFallback = (url = "", metadata = {}) => {
+  const keywords = imageKeywordsFromUrl(url);
+  return {
+    sourceType: "image",
+    title: titleFromFilename(url),
+    description: keywords.length ? `Saved image about ${keywords.join(", ")}` : `Saved image: ${filenameFromUrl(url)}`,
+    thumbnailUrl: url,
+    text: [titleFromFilename(url), keywords.join(" "), "saved image asset"].filter(Boolean).join(". "),
+    metadata: {
+      ...metadata,
+      imageUrl: url,
+      imageKeywords: keywords,
+      ocr: "optional"
+    }
+  };
 };
 
 const extractReadableText = ($) => {
@@ -115,11 +158,7 @@ const extractYoutubeFromHtml = ($, transcriptText = "", oembed = null, url = "")
     "";
   const thumbnailUrl = oembed?.thumbnail_url || pickMeta($, ["meta[property='og:image']", "meta[name='twitter:image']"]) || null;
   const keywordText = pickMeta($, ["meta[name='keywords']", "meta[property='og:video:tag']"]) || "";
-  const keywords = keywordText
-    .split(",")
-    .map((value) => collapseWhitespace(value))
-    .filter(Boolean)
-    .slice(0, 12);
+  const keywords = keywordText.split(",").map((value) => collapseWhitespace(value)).filter(Boolean).slice(0, 12);
   const videoId = extractYoutubeId(url);
 
   return {
@@ -139,30 +178,34 @@ const extractYoutubeFromHtml = ($, transcriptText = "", oembed = null, url = "")
   };
 };
 
-const fetchUrl = (url) =>
-  fetch(url, {
+const fetchUrl = async (url) => {
+  const response = await fetch(url, {
     headers: {
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
   });
+  return response;
+};
 
 const extractFromUrl = async (url, hintedSourceType) => {
-  const response = await fetchUrl(url);
-  const contentType = response.headers.get("content-type") || "";
+  let response;
+  try {
+    response = await fetchUrl(url);
+  } catch (error) {
+    if (hintedSourceType === "image" || isLikelyImageUrl(url)) {
+      app.log.warn({ url, error: error.message }, "Image fetch failed, using image fallback");
+      return imageFallback(url, { fetchFailed: true });
+    }
+    throw error;
+  }
 
-  if (contentType.includes("image/")) {
-    const title = titleFromFilename(url);
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("image/") || hintedSourceType === "image" || isLikelyImageUrl(url)) {
+    const imageBase64 = Buffer.from(await response.arrayBuffer()).toString("base64");
     return {
-      sourceType: "image",
-      title,
-      description: `Saved image: ${filenameFromUrl(url)}`,
-      thumbnailUrl: url,
-      text: `Image saved from ${url}. File name: ${filenameFromUrl(url)}. OCR not enabled.`,
-      metadata: {
-        imageUrl: url,
-        contentType,
-        ocr: "optional"
-      }
+      ...imageFallback(url, { contentType: contentType || null }),
+      imageBase64,
+      imageContentType: contentType || "image/jpeg"
     };
   }
 
@@ -186,7 +229,8 @@ const extractFromUrl = async (url, hintedSourceType) => {
   if (hintedSourceType === "youtube" || isYoutubeUrl(url)) {
     const oembed = await fetchYoutubeOEmbed(url);
     const youtube = extractYoutubeFromHtml($, "", oembed, url);
-    return { ...youtube, metadata: { ...youtube.metadata, contentType } };
+    const preview = await fetchBinaryPreview(youtube.thumbnailUrl);
+    return { ...youtube, metadata: { ...youtube.metadata, contentType }, ...preview };
   }
 
   const title =
@@ -232,12 +276,15 @@ const extractContent = async (item) => {
       const html = await response.text();
       const $ = cheerio.load(html);
       const extracted = extractYoutubeFromHtml($, transcriptText, oembed, item.url);
+      const preview = await fetchBinaryPreview(extracted.thumbnailUrl || item.thumbnail_url || null);
       return {
         sourceType: "youtube",
         title: extracted.title || item.title || "Saved YouTube video",
         description: extracted.description,
         author: extracted.author,
         thumbnailUrl: extracted.thumbnailUrl,
+        imageBase64: preview?.imageBase64 || null,
+        imageContentType: preview?.imageContentType || null,
         text: extracted.text || transcriptText || item.title || item.url,
         metadata: {
           ...(item.metadata || {}),
@@ -247,11 +294,14 @@ const extractContent = async (item) => {
       };
     } catch (error) {
       app.log.warn({ url: item.url, error: error.message }, "YouTube metadata fallback failed");
+      const preview = await fetchBinaryPreview(item.thumbnail_url || null);
       return {
         sourceType: "youtube",
         title: item.title || "Saved YouTube video",
         description: "YouTube video saved. Transcript or page metadata was not available.",
         thumbnailUrl: item.thumbnail_url || null,
+        imageBase64: preview?.imageBase64 || null,
+        imageContentType: preview?.imageContentType || null,
         text: [item.title, transcriptText, item.url].filter(Boolean).join(". "),
         metadata: {
           ...(item.metadata || {}),
@@ -263,20 +313,8 @@ const extractContent = async (item) => {
     }
   }
 
-  if (item.source_type === "pdf") {
-    return extractFromUrl(item.url, item.source_type);
-  }
-
-  if (item.source_type === "image") {
-    return {
-      sourceType: "image",
-      title: item.title || titleFromFilename(item.url),
-      description: item.description || `Saved image: ${filenameFromUrl(item.url)}`,
-      thumbnailUrl: item.url,
-      text: `Image saved from ${item.url}. File name: ${filenameFromUrl(item.url)}. OCR not enabled.`,
-      metadata: { ...(item.metadata || {}), imageUrl: item.url, ocr: "optional" }
-    };
-  }
+  if (item.source_type === "pdf") return extractFromUrl(item.url, item.source_type);
+  if (item.source_type === "image") return extractFromUrl(item.url, item.source_type);
 
   return extractFromUrl(item.url, item.source_type);
 };
@@ -287,10 +325,9 @@ const callJson = async (url, options = {}) => {
   return response.json();
 };
 
-new Worker(
-  "ingestion",
-  async (job) => {
-    const itemPayload = await callJson(`${contentServiceUrl}/items/${job.data.itemId}?userId=${job.data.userId}`);
+const processIngestionJob = async ({ itemId, userId, jobId = null }) => {
+  try {
+    const itemPayload = await callJson(`${contentServiceUrl}/items/${itemId}?userId=${userId}`);
     const item = itemPayload.item;
     const extracted = await extractContent(item);
     const normalizedSourceType = extracted.sourceType || item.source_type;
@@ -302,7 +339,9 @@ new Worker(
         text: aiInput,
         title: extracted.title || item.title,
         sourceType: normalizedSourceType,
-        imageUrl: extracted.thumbnailUrl || item.thumbnail_url || null
+        imageUrl: extracted.thumbnailUrl || item.thumbnail_url || null,
+        imageBase64: extracted.imageBase64 || null,
+        imageContentType: extracted.imageContentType || null
       })
     });
 
@@ -326,16 +365,50 @@ new Worker(
       })
     });
 
-    await callJson(`${searchServiceUrl}/index/${item.id}`, { method: "POST" });
-    await callJson(`${graphServiceUrl}/rebuild/${item.id}?userId=${job.data.userId}`, {
+    try {
+      await callJson(`${searchServiceUrl}/index/${item.id}`, { method: "POST" });
+    } catch (error) {
+      app.log.warn({ itemId: item.id, error: error.message }, "Search indexing failed after processing");
+    }
+
+    try {
+      await callJson(`${graphServiceUrl}/rebuild/${item.id}?userId=${userId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId })
+      });
+    } catch (error) {
+      app.log.warn({ itemId: item.id, error: error.message }, "Graph rebuild failed after processing");
+    }
+  } catch (error) {
+    app.log.error({ jobId, itemId, error: error.message }, "Ingestion job failed during processing");
+    await callJson(`${contentServiceUrl}/internal/items/${itemId}/process`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ userId: job.data.userId })
+      body: JSON.stringify({
+        status: "failed",
+        summary: "Processing failed for this item. Reprocess it after adjusting the source or configuration.",
+        metadata: { processingError: error.message }
+      })
+    }).catch(() => {});
+  }
+};
+
+app.post("/internal/process/:itemId", async (request, reply) => {
+  const userId = request.body?.userId || request.query.userId;
+  if (!userId) return reply.code(400).send({ message: "Missing userId" });
+  setImmediate(() => {
+    processIngestionJob({ itemId: request.params.itemId, userId }).catch((error) => {
+      app.log.error({ itemId: request.params.itemId, userId, error: error.message }, "Direct reprocess dispatch failed");
     });
-  },
-  { connection: redis }
-).on("failed", (job, error) => {
-  app.log.error({ jobId: job?.id, error: error.message }, "Ingestion job failed");
+  });
+  return { queued: true, itemId: request.params.itemId, direct: true };
 });
 
-
+new Worker(
+  "ingestion",
+  async (job) => processIngestionJob({ itemId: job.data.itemId, userId: job.data.userId, jobId: job.id }),
+  { connection: redis }
+).on("failed", (job, error) => {
+  app.log.error({ jobId: job?.id, itemId: job?.data?.itemId, error: error.message }, "Worker job failed");
+});

@@ -12,6 +12,17 @@ const port = Number(process.env.CONTENT_SERVICE_PORT || 4101);
 const pool = new Pool({ connectionString: process.env.POSTGRES_URL });
 const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379", { maxRetriesPerRequest: null });
 const ingestionQueue = new Queue("ingestion", { connection: redis });
+const workerServiceUrl = process.env.WORKER_SERVICE_URL || `http://localhost:${process.env.WORKER_SERVICE_PORT || 4105}`;
+
+const triggerWorkerDirect = async ({ itemId, userId }) => {
+  const response = await fetch(`${workerServiceUrl}/internal/process/${itemId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ userId })
+  });
+  if (!response.ok) throw new Error(`Direct worker trigger failed: ${response.status}`);
+  return response.json();
+};
 
 app.register(cors, { origin: true });
 app.get("/health", async () => ({ ok: true, service: "content-service" }));
@@ -140,10 +151,26 @@ app.delete("/items/:id", async (request, reply) => {
 
 app.post("/items/:id/reprocess", async (request, reply) => {
   const userId = userIdFrom(request);
-  const result = await pool.query("UPDATE items SET status = 'queued', updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING id", [request.params.id, userId]);
+  const result = await pool.query(
+    `UPDATE items
+     SET status = 'queued',
+         summary = 'Queued for reprocessing...',
+         updated_at = NOW(),
+         metadata = metadata || jsonb_build_object('reprocessRequestedAt', NOW()::text)
+     WHERE id = $1 AND user_id = $2
+     RETURNING *`,
+    [request.params.id, userId]
+  );
   if (!result.rows[0]) return reply.code(404).send({ message: "Item not found" });
-  await ingestionQueue.add("process-item", { itemId: request.params.id, userId }, { removeOnComplete: 1000, removeOnFail: 1000 });
-  return { queued: true, id: request.params.id };
+
+  try {
+    await triggerWorkerDirect({ itemId: request.params.id, userId });
+  } catch (error) {
+    request.log.warn({ itemId: request.params.id, error: error.message }, "Direct worker trigger failed, falling back to queue");
+    await ingestionQueue.add("process-item", { itemId: request.params.id, userId }, { removeOnComplete: 1000, removeOnFail: 1000 });
+  }
+
+  return { queued: true, id: request.params.id, item: result.rows[0] };
 });
 
 app.get("/collections", async (request) => {
@@ -209,7 +236,10 @@ app.post("/internal/items/:id/process", async (request, reply) => {
          keywords = COALESCE($10, keywords),
          ai_tags = COALESCE($11, ai_tags),
          embedding = COALESCE($12, embedding),
-         metadata = metadata || $13::jsonb,
+         metadata = CASE
+           WHEN COALESCE($14, 'processed') = 'processed' THEN (metadata - 'processingError') || $13::jsonb
+           ELSE metadata || $13::jsonb
+         END,
          status = COALESCE($14, status),
          collection_id = COALESCE(collection_id, $15),
          updated_at = NOW()
